@@ -1,0 +1,60 @@
+[project]
+name = "jobber-graphql-client"
+version = "0.1.0"
+description = "Shared Jobber GraphQL client: OAuth, keyring token storage, rate limiting, injectable response cache"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "keyring>=25.0.0",
+    "pydantic>=2.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jobber_graphql_client = ["py.typed"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.15.17",
+    "mypy>=2.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+]
+
+[tool.ruff.lint.per-file-ignores]
+# queries.py is copied verbatim from Jobber MCP (single home for all query strings,
+# per PLAN-0027 §2). Some GraphQL document lines inside the triple-quoted strings
+# exceed 100 chars; keeping the strings byte-identical to the source beats rewrapping.
+"src/jobber_graphql_client/queries.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+check_untyped_defs = true
+no_implicit_optional = true
