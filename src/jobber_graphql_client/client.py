@@ -26,6 +26,43 @@ from jobber_graphql_client.token_manager import TokenManager
 logger = logging.getLogger(__name__)
 
 
+#: Version notices already logged, so a chatty caller reports each distinct
+#: notice once per process rather than on every call. The nightly install-registry
+#: backfill makes hundreds of requests in one run.
+_seen_version_notices: set[str] = set()
+
+
+def log_version_notice(response_extensions: dict[str, Any]) -> None:
+    """Surface Jobber's API-version deprecation notice from ``extensions``.
+
+    Jobber reports version state under ``extensions.versioning``: the version
+    actually served, plus ``warning`` prose when that version is within three
+    months of losing support, or is already unsupported and removable at any
+    time.
+
+    This matters more than a typical log line. Jobber supports a version for a
+    minimum of 12 months and keeps it accessible for up to 18; once a version is
+    removed, requests are **silently upgraded to the oldest supported version**,
+    which can apply breaking changes with no deploy on our side to blame. This
+    notice is the only advance warning, and before this function existed it was
+    discarded -- ``extensions`` was passed only to the rate-limit tracker, which
+    reads only ``extensions["throttle"]``. An absence of warnings in the logs was
+    therefore never evidence that a pinned version was healthy.
+    """
+    versioning = (response_extensions or {}).get("versioning") or {}
+    warning = versioning.get("warning")
+    if not warning:
+        return
+    if warning in _seen_version_notices:
+        return
+    _seen_version_notices.add(warning)
+    logger.warning(
+        "Jobber API version notice (serving version=%s): %s",
+        versioning.get("version", "unknown"),
+        warning,
+    )
+
+
 class RateLimitInfo:
     """Tracks Jobber API rate limit state."""
 
@@ -222,6 +259,7 @@ class JobberGraphQLClient:
                 # Update rate limit from response
                 extensions = result.get("extensions", {})
                 self.rate_limit.update_from_response(extensions)
+                log_version_notice(extensions)
 
                 # Log rate limit status
                 status = self.rate_limit.get_status()
