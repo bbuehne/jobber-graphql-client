@@ -10,12 +10,10 @@ constructor argument (each consumer MUST use its own distinct service name;
 see JobberClientConfig.keyring_service_name).
 """
 
-import json
 import logging
 from datetime import datetime, timedelta
 
-import keyring
-import keyring.errors
+from jobber_graphql_client.token_store import KeyringTokenStore, TokenStore
 
 logger = logging.getLogger(__name__)
 
@@ -27,22 +25,43 @@ class TokenManager:
     secure credential storage (Windows Credential Manager, macOS Keychain, etc).
     """
 
-    def __init__(self, service_name: str):
+    def __init__(self, service_name: str, store: TokenStore | None = None):
         """Initialize token manager.
 
         Args:
             service_name: Service name for keyring. Consumers sharing a machine
                 must each use a distinct name — Jobber rotates refresh tokens on
                 use, so two processes sharing one stored token race each other.
+            store: Where tokens live. Defaults to the OS keyring, which is what
+                every existing consumer gets. A deployment that runs SEVERAL
+                processes against ONE credential should pass a store whose
+                ``supports_atomic_cas`` is true — the keyring cannot arbitrate
+                concurrent writes, and that is how lighting-estimator lost its
+                token on 2026-10-05.
         """
         self.service_name = service_name
         self.username = "jobber_oauth"  # Fixed username for Jobber tokens
+        self._store: TokenStore = store or KeyringTokenStore(service_name, self.username)
+
+    @property
+    def store(self) -> TokenStore:
+        """The backing store (read-only; set once at construction)."""
+        return self._store
+
+    def load_with_version(self) -> tuple[dict | None, int]:
+        """Token payload plus the version to hand back to :meth:`store_tokens`.
+
+        Read this BEFORE refreshing, and pass the version to the store on the
+        way back in, so a peer that rotated meanwhile is not clobbered.
+        """
+        return self._store.load()
 
     def store_tokens(
         self,
         access_token: str,
         refresh_token: str | None = None,
         expires_in: int | None = None,
+        expected_version: int | None = None,
     ) -> bool:
         """Store OAuth tokens securely.
 
@@ -68,18 +87,22 @@ class TokenManager:
                 "stored_at": datetime.utcnow().isoformat(),
             }
 
-            # Store in keyring
-            keyring.set_password(
-                self.service_name,
-                self.username,
-                json.dumps(token_data),
-            )
+            # Compare-and-swap when the caller read a version first; a blind
+            # write otherwise (same behaviour consumers had before).
+            if expected_version is None:
+                _, expected_version = self._store.load()
+            new_version = self._store.save(token_data, expected_version=expected_version)
+            if new_version is None:
+                # Someone else rotated first. Their token is newer and valid, so
+                # this is a no-op rather than a failure — never overwrite it.
+                logger.info("Jobber tokens already rotated by another process; kept theirs")
+                return False
 
-            logger.info("Jobber tokens stored securely in keyring")
+            logger.info("Jobber tokens stored securely")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to store tokens in keyring: {e}")
+            logger.error(f"Failed to store tokens: {e}")
             return False
 
     def get_access_token(self) -> str | None:
@@ -159,19 +182,12 @@ class TokenManager:
         Returns:
             True if successful, False otherwise
         """
-        try:
-            keyring.delete_password(self.service_name, self.username)
-            logger.info("Jobber tokens cleared from keyring")
-            return True
-
-        except keyring.errors.PasswordDeleteError:
-            # Token wasn't stored, which is fine
-            logger.debug("No stored tokens to clear")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to clear tokens: {e}")
-            return False
+        # Only an explicit sign-out should reach here. A FAILED REFRESH must
+        # never clear: with a rotating refresh token the loser of a race would
+        # delete the winner's perfectly good credential (see token_store).
+        if self._store.clear():
+            logger.info("Jobber tokens cleared")
+        return True
 
     def _get_token_data(self) -> dict | None:
         """Retrieve token data from keyring.
@@ -179,16 +195,8 @@ class TokenManager:
         Returns:
             Parsed token data or None if not found
         """
-        try:
-            token_json = keyring.get_password(self.service_name, self.username)
-            if not token_json:
-                return None
-
-            return json.loads(token_json)
-
-        except Exception as e:
-            logger.debug(f"Failed to get token data: {e}")
-            return None
+        data, _version = self._store.load()
+        return data
 
     def _is_token_expired(self, token_data: dict) -> bool:
         """Check if token data has expired.
