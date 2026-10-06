@@ -230,12 +230,27 @@ class JobberGraphQLClient:
                                 if refreshed:
                                     logger.info("Token refresh successful, retrying request...")
                                     continue  # Retry the loop with new token
-                                else:
-                                    logger.warning("Token refresh failed, clearing authentication")
+                                logger.warning(
+                                    "Token refresh failed; re-reading the store in case "
+                                    "another process refreshed first"
+                                )
                             else:
                                 logger.warning("No refresh token available")
-                            # Clear tokens only after refresh attempt failed
-                            self._oauth.clear_authentication()
+
+                            # DO NOT clear the stored credential here.
+                            #
+                            # Jobber rotates the refresh token on every use, so
+                            # when several processes share one credential the
+                            # loser of a race is rejected -- while the winner has
+                            # just stored a perfectly good token. Deleting on
+                            # that failure destroys the winner's token and turns
+                            # a recoverable blip into an outage that needs a
+                            # human to re-authorise. That is exactly what took
+                            # lighting-estimator down on 2026-10-05.
+                            #
+                            # Re-read instead: if a peer refreshed, use theirs.
+                            if self._token_manager.get_access_token():
+                                logger.info("Another process refreshed the token; using it")
                         continue  # One more attempt in case re-auth happened elsewhere
                     else:
                         # Second attempt failed, give up

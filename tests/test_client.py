@@ -225,13 +225,26 @@ async def test_401_token_already_refreshed_by_other_request(config, install_tran
     assert oauth.refresh_calls == []  # no refresh performed by this client
 
 
-async def test_401_refresh_failure_clears_auth_and_raises(config, install_transport):
+async def test_401_refresh_failure_does_not_clear_auth(config, install_transport):
+    """A failed refresh must NEVER delete the stored credential.
+
+    Jobber rotates the refresh token on every use, so when several processes
+    share one credential the loser of a race is rejected while the WINNER has
+    just stored a perfectly good token. Deleting on that failure destroys the
+    winner's token and turns a recoverable blip into an outage needing a human
+    to re-authorise.
+
+    That is not hypothetical: it took lighting-estimator's tour typeahead,
+    nightly backfill and MCP connector sign-ins down on 2026-10-05, six minutes
+    after a deploy restart.
+
+    It still raises — the caller's request genuinely cannot be served — but it
+    leaves the credential alone.
+    """
     install_transport(lambda request: httpx.Response(401, json={"error": "unauthorized"}))
     tm = FakeTokenManager(access_token="token-1", refresh_token="refresh-1")
     oauth = FakeOAuth(tm, refresh_ok=False)
 
-    # After clear_authentication, ensure_valid_token would return None on the
-    # second attempt, so keep a token available to reach the second 401 branch.
     async def always_token():
         return "token-1"
 
@@ -242,7 +255,7 @@ async def test_401_refresh_failure_clears_auth_and_raises(config, install_transp
         await client.execute(QUERY, use_cache=False)
 
     assert oauth.refresh_calls == ["refresh-1"]
-    assert oauth.cleared is True
+    assert oauth.cleared is False, "a failed refresh deleted the credential"
 
 
 async def test_not_authenticated_raises_value_error(config, install_transport):
