@@ -770,7 +770,14 @@ query ListRequestsEnhanced(
     $after: String
     $filter: RequestFilterAttributes
     $searchTerm: String
-    $sort: RequestsSortInput
+    # `requests(sort:)` takes a LIST of sort inputs, not a single one. Declared
+    # as the bare type, every call failed with "List dimension mismatch on
+    # variable $sort and argument sort (RequestsSortInput /
+    # [RequestsSortInput!])". The sibling list queries here already spell it
+    # this way; `clients` and `paymentRecords` genuinely do take a bare input,
+    # so they are correct as written -- all nine were checked against
+    # jobber_schema.json and this was the only mismatch.
+    $sort: [RequestsSortInput!]
 ) {
     requests(
         first: $limit
